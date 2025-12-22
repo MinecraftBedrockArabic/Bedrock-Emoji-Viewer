@@ -26,7 +26,7 @@ Each glyph file should contain a 16x16 grid of emojis.
 
 Use **actual Unicode characters** (not escape sequences):
 ```javascript
-const text = "Hello  World";  // Where  is the actual U+E806 character
+const text = "Hello  World";  // Where  is the actual U+E000 character (0xE000)
 ```
 
 The extension will **replace** the Unicode character with the emoji image from your glyph files.
