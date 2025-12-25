@@ -2,7 +2,7 @@
   "name": "bedrock-emoji-viewer",
   "displayName": "Bedrock Emoji Viewer",
   "description": "Display Minecraft Bedrock custom emoji glyphs inline in your editor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "engines": {
     "vscode": "^1.103.0"
   },
@@ -28,10 +28,29 @@
           "description": "Hide the original Unicode emoji character and only show the icon."
         }
       }
-    }
+    },
+    "commands": [
+      {
+        "command": "bedrockEmoji.convertToUnicode",
+        "title": "Convert Hex to Unicode"
+      },
+      {
+        "command": "bedrockEmoji.reloadGlyphs",
+        "title": "Reload Bedrock Emoji Glyphs"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "bedrockEmoji.convertToUnicode",
+        "key": "ctrl+shift+u",
+        "mac": "cmd+shift+u",
+        "when": "editorTextFocus"
+      }
+    ]
   },
   "devDependencies": {
     "@types/vscode": "^1.103.0",
     "@types/node": "^25.0.0"
-  }
+  },
+  "publisher": "BeyondBedrock"
 }

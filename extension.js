@@ -82,7 +82,170 @@ function activate(context) {
         })
     );
 
+    // Open Emoji Picker for the typed Hex Byte
+    context.subscriptions.push(
+        vscode.commands.registerCommand('bedrockEmoji.convertToUnicode', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) return;
+
+            const document = editor.document;
+            const cursorPos = editor.selection.active;
+            const lineText = document.lineAt(cursorPos).text;
+            const textUpToCursor = lineText.substring(0, cursorPos.character);
+
+            // Regex matches: \uXX, 0xXX, U+XX, or just XX (2 hex digits) at the end of the string
+            const match = textUpToCursor.match(/(\\u|0x|[uU]\+)?([0-9a-fA-F]{2})$/);
+
+            if (!match) {
+                vscode.window.showWarningMessage('No valid hex byte (\\uXX, 0xXX, U+XX, XX) found before cursor.');
+                return;
+            }
+
+            const prefix = match[1] || "";
+            const hexByte = match[2].toUpperCase();
+            const hexByteVal = parseInt(hexByte, 16);
+
+            // 1. Find the image file for this byte (e.g., glyph_E0.png)
+            const imagePath = findGlyphFile(hexByte);
+
+            if (!imagePath) {
+                vscode.window.showWarningMessage(`Could not find glyph file: glyph_${hexByte}.png in workspace font folder.`);
+                return;
+            }
+
+            // 2. Read image and generate Base64
+            let imageBase64;
+            try {
+                const imageBuffer = fs.readFileSync(imagePath);
+                imageBase64 = imageBuffer.toString('base64');
+            } catch (e) {
+                vscode.window.showErrorMessage(`Failed to read image file: ${imagePath}`);
+                return;
+            }
+
+            // 3. Generate QuickPick Items
+            const items = [];
+            // Standard Minecraft glyph sheets are 256x256 containing 16x16 grid of 16x16 icons
+            // Note: We use an SVG Data URI to slice the image for the icon
+            
+            for (let row = 0; row < 16; row++) {
+                for (let col = 0; col < 16; col++) {
+                    const offset = row * 16 + col;
+                    const unicode = (hexByteVal * 256) + offset;
+                    const charString = String.fromCodePoint(unicode);
+                    
+                    // Create a cropped icon using SVG
+                    // x/y are negative to shift the background image into view
+                    const x = col * 16;
+                    const y = row * 16;
+                    
+                    // Note: We encode the SVG as a base64 data URI to use as an icon
+                    const svgString = `
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+                            <image href="data:image/png;base64,${imageBase64}" x="-${x}" y="-${y}" width="256" height="256" />
+                        </svg>
+                    `;
+                    const iconUri = vscode.Uri.parse(`data:image/svg+xml;base64,${Buffer.from(svgString).toString('base64')}`);
+
+                    items.push({
+                        label: charString, // The actual emoji char as label
+                        description: `U+${unicode.toString(16).toUpperCase().padStart(4, '0')} [${row}, ${col}]`,
+                        iconPath: iconUri,
+                        alwaysShow: true,
+                        data: { unicode, prefixLength: prefix.length + hexByte.length }
+                    });
+                }
+            }
+
+            // 4. Show QuickPick
+            const quickPick = vscode.window.createQuickPick();
+            quickPick.items = items;
+            quickPick.placeholder = `Select a glyph from glyph_${hexByte}.png`;
+            quickPick.canSelectMany = false;
+            quickPick.matchOnDescription = true;
+            quickPick.matchOnDetail = true;
+
+            quickPick.show();
+
+            // 5. Handle Selection
+            quickPick.onDidAccept(() => {
+                const selected = quickPick.selectedItems[0];
+                if (selected) {
+                    const rangeToReplace = new vscode.Range(
+                        cursorPos.translate(0, -selected.data.prefixLength),
+                        cursorPos
+                    );
+
+                    editor.edit(editBuilder => {
+                        editBuilder.replace(rangeToReplace, selected.label);
+                    });
+                }
+                quickPick.hide();
+            });
+
+            quickPick.onDidHide(() => quickPick.dispose());
+        })
+    );
+
     if (vscode.window.activeTextEditor) updateDecorations(vscode.window.activeTextEditor);
+}
+
+// Helper to find the specific glyph file path
+function findGlyphFile(hexByte) {
+    // First check cache (if the glyphs were already loaded)
+    // Any codepoint in this range works to get the path
+    const sampleCodePoint = parseInt(hexByte, 16) * 256;
+    for (let i = 0; i < 256; i++) {
+        const info = glyphCache.get(sampleCodePoint + i);
+        if (info) return info.imagePath;
+    }
+
+    // If not in cache (new file?), search disk
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) return null;
+
+    const rootPath = workspaceFolders[0].uri.fsPath;
+    const targetFile = `glyph_${hexByte.toUpperCase()}.png`;
+
+    // Search logic similar to loadGlyphs but targeted
+    function searchDir(dir, depth) {
+        if (depth > 3) return null;
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+                
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    if (entry.name === 'font') {
+                        const fontDir = fullPath;
+                        try {
+                            const files = fs.readdirSync(fontDir);
+                            const found = files.find(f => f.toLowerCase() === targetFile.toLowerCase());
+                            if (found) return path.join(fontDir, found);
+                        } catch(e){}
+                    } else {
+                        const res = searchDir(fullPath, depth + 1);
+                        if (res) return res;
+                    }
+                }
+            }
+        } catch(e) {}
+        return null;
+    }
+
+    // Check root/font first
+    const rootFont = path.join(rootPath, 'font');
+    if (fs.existsSync(rootFont)) {
+        try {
+            const files = fs.readdirSync(rootFont);
+            const found = files.find(f => f.toLowerCase() === targetFile.toLowerCase());
+            if (found) return path.join(rootFont, found);
+        } catch(e){}
+    }
+
+    // Recursive search
+    return searchDir(rootPath, 0);
 }
 
 function isHideSourceCharEnabled() {
