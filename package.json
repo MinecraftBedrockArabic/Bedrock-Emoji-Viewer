@@ -18,7 +18,8 @@
     "onStartupFinished"
   ],
   "scripts": {
-    "build": "vsce package"
+    "build": "vsce package",
+    "pub": "vsce publish"
   },
   "main": "./extension.js",
   "contributes": {
