@@ -65,6 +65,12 @@ XX
 - Displays all emojis from the corresponding `glyph_XX.png`
 - Select an emoji to insert it into the editor
 
+### Settings
+
+- **Hide Source Char:** Hide the original Unicode emoji character and only show the icon.
+- **Ignore Transparent Glyphs:** Ignores glyphs that are completely transparent during loading.
+
+
 ---
 
 ### Notes
