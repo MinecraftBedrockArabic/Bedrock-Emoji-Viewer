@@ -8,7 +8,7 @@ A VS Code extension that displays Minecraft Bedrock custom emoji glyphs inline i
 - **Hover Information**: Hover over `\uXXXX` to see glyph details and a larger preview
 - **Auto-Detection**: Scans for `glyph_XX.png` files in your workspace
 - **Real-time Updates**: Updates decorations as you type
-- **Vanilla Emoji fallback**: Uses `glyph_E0.png` and `glyph_E1.png` if they are not used in the workspac
+- **Vanilla Emoji fallback**: Uses `glyph_E0.png` and `glyph_E1.png` if they are not used in the workspace
 
 ### File Structure
 
