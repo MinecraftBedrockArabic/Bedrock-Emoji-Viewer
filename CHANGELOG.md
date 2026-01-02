@@ -4,12 +4,27 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [1.3.0] - 2025-12-29
+## [1.3.1] - 2026-01-02
+
+### Added
+- Updated the Readme
+- Updated the Changelog
+
+---
+
+## [1.3.0] - 2026-01-02
 
 ### Added
 - Added a setting to ignore transparency
-- fixed some bugs
+- Updated the Readme
 - Updated the Changelog
+
+---
+
+## [1.2.0] - 2025-12-26
+
+### Added
+- Bug fixes
 
 ---
 
