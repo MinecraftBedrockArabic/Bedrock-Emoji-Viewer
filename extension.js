@@ -1,9 +1,35 @@
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
+const { PNG } = require('pngjs');
 
 let glyphCache = new Map();
 let decorationTypes = new Map();
+
+// Check if a 16x16 glyph block is completely transparent
+function isGlyphTransparent(pngData, row, col) {
+    const startX = col * 16;
+    const startY = row * 16;
+
+    for (let y = 0; y < 16; y++) {
+        for (let x = 0; x < 16; x++) {
+            const posX = startX + x;
+            const posY = startY + y;
+
+            // Calculate index in the buffer (RGBA = 4 bytes per pixel)
+            const idx = (posY * pngData.width + posX) << 2;
+
+            // Check Alpha channel (4th byte)
+            const alpha = pngData.data[idx + 3];
+
+            // If alpha > 0, the glyph is visible
+            if (alpha > 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 function activate(context) {
     console.log('Bedrock Emoji extension activated');
@@ -24,12 +50,18 @@ function activate(context) {
         })
     );
 
-    // React to configuration changes (for hideSourceChar)
+    // React to configuration changes (for hideSourceChar and ignoreTransparentGlyphs)
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration(e => {
-            if (e.affectsConfiguration('bedrockEmoji.hideSourceChar')) {
+            const shouldReload = e.affectsConfiguration('bedrockEmoji.hideSourceChar') ||
+                e.affectsConfiguration('bedrockEmoji.ignoreTransparentGlyphs');
+
+            if (shouldReload) {
                 decorationTypes.forEach(dec => dec.dispose());
                 decorationTypes.clear();
+                glyphCache.clear();
+
+                loadGlyphs();
                 const editor = vscode.window.activeTextEditor;
                 if (editor) updateDecorations(editor);
             }
@@ -93,19 +125,40 @@ function activate(context) {
             const lineText = document.lineAt(cursorPos).text;
             const textUpToCursor = lineText.substring(0, cursorPos.character);
 
-            // Regex matches: \uXX, 0xXX, U+XX, or just XX (2 hex digits) at the end of the string
-            const match = textUpToCursor.match(/(\\u|0x|[uU]\+)?([0-9a-fA-F]{2})$/);
+            // Match hex patterns: \uXX(XX), 0xXX(XX), U+XX(XX), or just XX(XX)
+            const match = textUpToCursor.match(/(\\u|0x|[uU]\+)?([0-9a-fA-F]{2,4})$/);
 
             if (!match) {
-                vscode.window.showWarningMessage('No valid hex byte (\\uXX, 0xXX, U+XX, XX) found before cursor.');
+                vscode.window.showWarningMessage('No valid hex value found before cursor.');
                 return;
             }
 
             const prefix = match[1] || "";
-            const hexByte = match[2].toUpperCase();
-            const hexByteVal = parseInt(hexByte, 16);
+            const hexValue = match[2].toUpperCase();
 
-            // 1. Find the image file for this byte (e.g., glyph_E0.png)
+            // Check if this is a 4-digit codepoint (direct insert) or 2-digit glyph file (picker)
+            if (hexValue.length === 4) {
+                // Direct insert mode: E100 -> insert U+E100
+                const codePoint = parseInt(hexValue, 16);
+                const charString = String.fromCodePoint(codePoint);
+
+                const rangeToReplace = new vscode.Range(
+                    cursorPos.translate(0, -(prefix.length + hexValue.length)),
+                    cursorPos
+                );
+
+                editor.edit(editBuilder => {
+                    editBuilder.replace(rangeToReplace, charString);
+                });
+                return;
+            }
+
+            // Picker mode: E1 -> show picker for glyph_E1.png
+            const hexByte = hexValue; // Already 2 digits
+            const hexByteVal = parseInt(hexByte, 16);
+            const glyphByte = hexByteVal; // For use in the picker loop below
+
+            // Find the image file for this byte (glyph_E1.png)
             const imagePath = findGlyphFile(hexByte);
 
             if (!imagePath) {
@@ -113,51 +166,65 @@ function activate(context) {
                 return;
             }
 
-            // 2. Read image and generate Base64
+            // Read image and generate Base64
             let imageBase64;
+            let pngData = null;
+
             try {
                 const imageBuffer = fs.readFileSync(imagePath);
                 imageBase64 = imageBuffer.toString('base64');
+
+                // If setting is enabled, parse PNG to check transparency
+                const config = vscode.workspace.getConfiguration('bedrockEmoji');
+                if (config.get('ignoreTransparentGlyphs', true)) {
+                    try {
+                        pngData = PNG.sync.read(imageBuffer);
+                    } catch (e) {
+                        console.error('Failed to parse PNG for transparency check in picker', e);
+                    }
+                }
+
             } catch (e) {
                 vscode.window.showErrorMessage(`Failed to read image file: ${imagePath}`);
                 return;
             }
 
-            // 3. Generate QuickPick Items
+            // Generate QuickPick Items
             const items = [];
-            // Standard Minecraft glyph sheets are 256x256 containing 16x16 grid of 16x16 icons
-            // Note: We use an SVG Data URI to slice the image for the icon
-            
+
             for (let row = 0; row < 16; row++) {
                 for (let col = 0; col < 16; col++) {
+                    // If we have png data and the block is transparent, skip it
+                    if (pngData && isGlyphTransparent(pngData, row, col)) {
+                        continue;
+                    }
+
                     const offset = row * 16 + col;
-                    const unicode = (hexByteVal * 256) + offset;
+                    const unicode = (glyphByte * 256) + offset;
                     const charString = String.fromCodePoint(unicode);
-                    
+
                     // Create a cropped icon using SVG
-                    // x/y are negative to shift the background image into view
                     const x = col * 16;
                     const y = row * 16;
-                    
-                    // Note: We encode the SVG as a base64 data URI to use as an icon
+
                     const svgString = `
-                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
-                            <image href="data:image/png;base64,${imageBase64}" x="-${x}" y="-${y}" width="256" height="256" />
-                        </svg>
-                    `;
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+                        <image href="data:image/png;base64,${imageBase64}" x="-${x}" y="-${y}" width="256" height="256" />
+                    </svg>
+                `;
                     const iconUri = vscode.Uri.parse(`data:image/svg+xml;base64,${Buffer.from(svgString).toString('base64')}`);
 
                     items.push({
-                        label: charString, // The actual emoji char as label
+                        label: charString,
                         description: `U+${unicode.toString(16).toUpperCase().padStart(4, '0')} [${row}, ${col}]`,
                         iconPath: iconUri,
                         alwaysShow: true,
-                        data: { unicode, prefixLength: prefix.length + hexByte.length }
+                        data: { unicode, prefixLength: prefix.length + hexValue.length }
                     });
                 }
             }
 
-            // 4. Show QuickPick
+            // Show QuickPick
             const quickPick = vscode.window.createQuickPick();
             quickPick.items = items;
             quickPick.placeholder = `Select a glyph from glyph_${hexByte}.png`;
@@ -167,7 +234,7 @@ function activate(context) {
 
             quickPick.show();
 
-            // 5. Handle Selection
+            // Handle Selection
             quickPick.onDidAccept(() => {
                 const selected = quickPick.selectedItems[0];
                 if (selected) {
@@ -214,7 +281,7 @@ function findGlyphFile(hexByte) {
             const entries = fs.readdirSync(dir, { withFileTypes: true });
             for (const entry of entries) {
                 if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-                
+
                 const fullPath = path.join(dir, entry.name);
                 if (entry.isDirectory()) {
                     if (entry.name === 'font') {
@@ -223,14 +290,14 @@ function findGlyphFile(hexByte) {
                             const files = fs.readdirSync(fontDir);
                             const found = files.find(f => f.toLowerCase() === targetFile.toLowerCase());
                             if (found) return path.join(fontDir, found);
-                        } catch(e){}
+                        } catch (e) { }
                     } else {
                         const res = searchDir(fullPath, depth + 1);
                         if (res) return res;
                     }
                 }
             }
-        } catch(e) {}
+        } catch (e) { }
         return null;
     }
 
@@ -241,7 +308,7 @@ function findGlyphFile(hexByte) {
             const files = fs.readdirSync(rootFont);
             const found = files.find(f => f.toLowerCase() === targetFile.toLowerCase());
             if (found) return path.join(rootFont, found);
-        } catch(e){}
+        } catch (e) { }
     }
 
     // Recursive search
@@ -271,13 +338,30 @@ function loadGlyphs() {
     searchForFontDirs(rootPath, 0, 3);
 
     // fallback to vanilla emoji if E0 or E1 missing
+    const config = vscode.workspace.getConfiguration('bedrockEmoji');
+    const ignoreTransparent = config.get('ignoreTransparentGlyphs', true);
+
     const extVanillaPath = path.join(__dirname, 'vanilla');
     ['E0', 'E1'].forEach(glyph => {
         const codeStart = parseInt(glyph, 16) * 256; // 0xE0*256 = 0xE000
         const filePath = path.join(extVanillaPath, `glyph_${glyph}.png`);
+
         if (!glyphCache.has(codeStart) && fs.existsSync(filePath)) {
+            let pngData = null;
+            if (ignoreTransparent) {
+                try {
+                    const buffer = fs.readFileSync(filePath);
+                    pngData = PNG.sync.read(buffer);
+                } catch (e) { }
+            }
+
             for (let row = 0; row < 16; row++) {
                 for (let col = 0; col < 16; col++) {
+                    // Check transparency if enabled
+                    if (pngData && isGlyphTransparent(pngData, row, col)) {
+                        continue;
+                    }
+
                     const unicode = codeStart + (row * 16 + col);
                     glyphCache.set(unicode, {
                         glyphFile: glyph,
@@ -307,10 +391,13 @@ function searchForFontDirs(dir, currentDepth, maxDepth) {
                 searchForFontDirs(fullPath, currentDepth + 1, maxDepth);
             }
         }
-    } catch (e) {}
+    } catch (e) { }
 }
 
 function scanGlyphFiles(fontPath) {
+    const config = vscode.workspace.getConfiguration('bedrockEmoji');
+    const ignoreTransparent = config.get('ignoreTransparentGlyphs', true);
+
     try {
         const files = fs.readdirSync(fontPath);
         for (const file of files) {
@@ -320,8 +407,23 @@ function scanGlyphFiles(fontPath) {
             const glyphByte = parseInt(match[1], 16);
             const fullPath = path.join(fontPath, file);
 
+            let pngData = null;
+            if (ignoreTransparent) {
+                try {
+                    const buffer = fs.readFileSync(fullPath);
+                    pngData = PNG.sync.read(buffer);
+                } catch (e) {
+                    console.warn(`Could not parse PNG for transparency check: ${file}`);
+                }
+            }
+
             for (let row = 0; row < 16; row++) {
                 for (let col = 0; col < 16; col++) {
+                    // Check transparency if enabled
+                    if (pngData && isGlyphTransparent(pngData, row, col)) {
+                        continue;
+                    }
+
                     const unicode = (glyphByte * 256) + (row * 16 + col);
                     glyphCache.set(unicode, {
                         glyphFile: match[1].toUpperCase(),
@@ -332,7 +434,7 @@ function scanGlyphFiles(fontPath) {
                 }
             }
         }
-    } catch (e) {}
+    } catch (e) { }
 }
 
 function getGlyphInfo(codePoint) {
